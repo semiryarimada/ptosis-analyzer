@@ -1,33 +1,32 @@
 """
-MediaPipe Face Mesh (legacy solutions API) landmark detection.
-Uses mp.solutions.face_mesh with refine_landmarks=True to get
-iris landmarks (468-477) in addition to the 468-point face mesh.
-
+MediaPipe Tasks API landmark detection (mediapipe >= 0.10.30).
 Iris centers, iris radius (→ px/mm via 11.7mm), canthal points,
 and upper eyelid margin points for both eyes.
 """
 
 import os
+import sys
+import urllib.request
 import numpy as np
 import cv2
 from dataclasses import dataclass
 from typing import Optional
 
 import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
-mp_face_mesh = mp.solutions.face_mesh
-
-# ── Iris centers ─────────────────────────────────────────────────────────────
-LEFT_IRIS_CENTER       = 473
-RIGHT_IRIS_CENTER      = 468
-RIGHT_IRIS_ALL4        = [469, 470, 471, 472]
-LEFT_IRIS_ALL4         = [474, 475, 476, 477]
+# ── Iris centers & all 4 boundary points ────────────────────────────────────
+LEFT_IRIS_CENTER      = 473
+RIGHT_IRIS_CENTER     = 468
+RIGHT_IRIS_ALL4       = [469, 470, 471, 472]
+LEFT_IRIS_ALL4        = [474, 475, 476, 477]
 
 # ── Canthal points ───────────────────────────────────────────────────────────
-LEFT_MEDIAL_CANTHUS    = 362
-LEFT_LATERAL_CANTHUS   = 263
-RIGHT_MEDIAL_CANTHUS   = 133
-RIGHT_LATERAL_CANTHUS  = 33
+LEFT_MEDIAL_CANTHUS   = 362
+LEFT_LATERAL_CANTHUS  = 263
+RIGHT_MEDIAL_CANTHUS  = 133
+RIGHT_LATERAL_CANTHUS = 33
 
 # ── Upper eyelid MARGIN landmarks (lateral → medial) ─────────────────────────
 RIGHT_UPPER_LID_MARGIN = [246, 161, 160, 159, 158, 157, 173]
@@ -35,15 +34,45 @@ LEFT_UPPER_LID_MARGIN  = [466, 388, 387, 386, 385, 384, 398]
 
 IRIS_DIAMETER_MM = 11.7
 
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+)
+
+# Model path: writable cache in user home (works both locally and on cloud)
+if getattr(sys, "frozen", False):
+    _bundled = os.path.join(sys._MEIPASS, "pipeline", "face_landmarker.task")
+    if os.path.exists(_bundled):
+        MODEL_PATH = _bundled
+    else:
+        _cache = os.path.join(os.path.expanduser("~"), ".ptosis_analyzer")
+        os.makedirs(_cache, exist_ok=True)
+        MODEL_PATH = os.path.join(_cache, "face_landmarker.task")
+else:
+    _local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_landmarker.task")
+    if os.path.exists(_local):
+        MODEL_PATH = _local
+    else:
+        _cache = os.path.join(os.path.expanduser("~"), ".ptosis_analyzer")
+        os.makedirs(_cache, exist_ok=True)
+        MODEL_PATH = os.path.join(_cache, "face_landmarker.task")
+
+
+def _ensure_model():
+    if not os.path.exists(MODEL_PATH):
+        print("Downloading MediaPipe face_landmarker model (~6 MB)…")
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        print("Model downloaded.")
+
 
 @dataclass
 class EyeLandmarks:
-    pupil_center:       np.ndarray   # (x, y) px
+    pupil_center:       np.ndarray
     iris_radius_px:     float
     px_per_mm:          float
     medial_canthus:     np.ndarray
     lateral_canthus:    np.ndarray
-    upper_lid_margin:   np.ndarray   # (N, 2) ordered lateral→medial
+    upper_lid_margin:   np.ndarray
 
 
 @dataclass
@@ -57,26 +86,32 @@ class LandmarkResult:
 
 
 def detect_landmarks(image_bgr: np.ndarray) -> LandmarkResult:
+    _ensure_model()
+
     result    = LandmarkResult()
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     result.image_rgb = image_rgb
     h, w = image_bgr.shape[:2]
 
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=True,
-        max_num_faces=1,
-        refine_landmarks=True,      # enables iris landmarks 468-477
-        min_detection_confidence=0.5,
+    base_opts = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
+    options   = mp_vision.FaceLandmarkerOptions(
+        base_options=base_opts,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
         min_tracking_confidence=0.5,
-    ) as face_mesh:
-        detection = face_mesh.process(image_rgb)
+    )
 
-    if not detection.multi_face_landmarks:
+    with mp_vision.FaceLandmarker.create_from_options(options) as detector:
+        mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+        detection = detector.detect(mp_image)
+
+    if not detection.face_landmarks:
         result.warning_msg    = "No face detected. Please use a clear frontal face photo."
         result.low_confidence = True
         return result
 
-    lms = detection.multi_face_landmarks[0].landmark
+    lms = detection.face_landmarks[0]
 
     def lm(idx) -> np.ndarray:
         pt = lms[idx]
