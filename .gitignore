@@ -1,0 +1,6 @@
+python_embedded/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log

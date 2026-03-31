@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #111; overflow: hidden; font-family: Arial, sans-serif; }
+  canvas { display: block; cursor: crosshair; touch-action: none; }
+  #hint { color: #999; font-size: 11px; padding: 3px 5px; background: #1a1a1a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Kırmızı noktaları sürükleyin / Drag red dots to adjust lid margin</div>
+
+<script>
+(function() {
+  "use strict";
+
+  var canvas   = document.getElementById("c");
+  var ctx      = canvas.getContext("2d");
+  var pts      = [];
+  var dragging = -1;
+  var img      = null;
+  var SCALE    = 1;
+  var OX       = 0, OY = 0;
+
+  // ── Streamlit postMessage protocol ─────────────────────────────────────────
+  function sendToStreamlit(type, data) {
+    var msg = Object.assign({ type: type }, data);
+    window.parent.postMessage(msg, "*");
+  }
+
+  // Signal ready
+  sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+
+  // Receive render events
+  window.addEventListener("message", function(ev) {
+    var d = ev.data;
+    if (!d || d.type !== "streamlit:render") return;
+
+    var args = d.args || {};
+    SCALE = args.scale || 1;
+    OX    = args.ox    || 0;
+    OY    = args.oy    || 0;
+
+    // Accept new pts from Python only when not dragging
+    if (dragging < 0 && args.pts_display) {
+      pts = args.pts_display.map(function(p) { return [+p[0], +p[1]]; });
+    }
+
+    var w = args.width  || 420;
+    var h = args.height || 200;
+    canvas.width  = w;
+    canvas.height = h;
+
+    sendToStreamlit("streamlit:setFrameHeight", { height: h + 24 });
+
+    if (args.image_b64) {
+      var im = new Image();
+      im.onload = function() { img = im; draw(); };
+      im.src = "data:image/png;base64," + args.image_b64;
+    } else {
+      draw();
+    }
+  });
+
+  // ── Draw ───────────────────────────────────────────────────────────────────
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (img) ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    for (var i = 0; i < pts.length; i++) {
+      var p      = pts[i];
+      var active = (i === dragging);
+
+      // Glow
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 13, 0, 2 * Math.PI);
+      ctx.fillStyle = active ? "rgba(255,180,0,0.30)" : "rgba(255,50,50,0.20)";
+      ctx.fill();
+
+      // Dot
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 7, 0, 2 * Math.PI);
+      ctx.fillStyle   = active ? "#ffaa00" : "#ff3333";
+      ctx.fill();
+      ctx.strokeStyle = "white";
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+
+      // Number
+      ctx.shadowColor = "black";
+      ctx.shadowBlur  = 3;
+      ctx.fillStyle   = "white";
+      ctx.font        = "bold 11px Arial";
+      ctx.fillText(String(i + 1), p[0] + 10, p[1] - 4);
+      ctx.shadowBlur  = 0;
+    }
+  }
+
+  // ── Hit-test ────────────────────────────────────────────────────────────────
+  function hit(mx, my) {
+    for (var i = 0; i < pts.length; i++) {
+      var dx = pts[i][0] - mx, dy = pts[i][1] - my;
+      if (dx*dx + dy*dy < 16*16) return i;
+    }
+    return -1;
+  }
+
+  function canvasXY(clientX, clientY) {
+    var r = canvas.getBoundingClientRect();
+    return [
+      (clientX - r.left) * (canvas.width  / r.width),
+      (clientY - r.top)  * (canvas.height / r.height)
+    ];
+  }
+
+  function commitDrag() {
+    dragging = -1;
+    canvas.style.cursor = "crosshair";
+    // Return display coords — Python converts to world
+    sendToStreamlit("streamlit:setComponentValue", {
+      value:    pts,
+      dataType: "json"
+    });
+    draw();
+  }
+
+  // ── Mouse ───────────────────────────────────────────────────────────────────
+  canvas.addEventListener("mousedown", function(e) {
+    var pos = canvasXY(e.clientX, e.clientY);
+    dragging = hit(pos[0], pos[1]);
+    if (dragging >= 0) canvas.style.cursor = "grabbing";
+    draw();
+  });
+
+  canvas.addEventListener("mousemove", function(e) {
+    if (dragging < 0) return;
+    var pos = canvasXY(e.clientX, e.clientY);
+    pts[dragging] = [pos[0], pos[1]];
+    draw();
+  });
+
+  canvas.addEventListener("mouseup", function() {
+    if (dragging >= 0) commitDrag();
+  });
+
+  canvas.addEventListener("mouseleave", function() {
+    if (dragging >= 0) commitDrag();
+  });
+
+  // ── Touch ────────────────────────────────────────────────────────────────────
+  canvas.addEventListener("touchstart", function(e) {
+    e.preventDefault();
+    var pos = canvasXY(e.touches[0].clientX, e.touches[0].clientY);
+    dragging = hit(pos[0], pos[1]);
+    draw();
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", function(e) {
+    e.preventDefault();
+    if (dragging < 0) return;
+    var pos = canvasXY(e.touches[0].clientX, e.touches[0].clientY);
+    pts[dragging] = [pos[0], pos[1]];
+    draw();
+  }, { passive: false });
+
+  canvas.addEventListener("touchend", function(e) {
+    e.preventDefault();
+    if (dragging >= 0) commitDrag();
+  }, { passive: false });
+
+})();
+</script>
+</body>
+</html>
